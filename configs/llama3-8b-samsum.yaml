@@ -2,6 +2,7 @@
 model:
   name: "meta-llama/Llama-2-7b-hf"
   max_length: 2048
+  use_flash_attention: true
   hidden_size: 4096
 
 # Training configuration
@@ -10,11 +11,14 @@ training:
   weight_decay: 0.01
   num_epochs: 3
   warmup_steps: 100
-  batch_size: 4
-  gradient_accumulation_steps: 8
+  batch_size: 8
+  gradient_accumulation_steps: 4
   eval_steps: 100
   save_steps: 500
   use_fp16: true
+  max_steps: 1000
+  mixed_precision: "bf16"
+  gradient_checkpointing: true
 
 # Dataset configuration
 dataset:
@@ -22,7 +26,8 @@ dataset:
   train_split: "train"
   val_split: "validation"
   test_split: "test"
-  max_samples: null  # Use all samples
+  max_samples: 10000
+  validation_split: 0.1
   preprocessing:
     max_length: 2048
     truncation: true
@@ -54,6 +59,7 @@ freezing_scheduler:
   window_size: 10
   unfreeze_threshold: 0.1
   min_steps: 100
+  min_layers: 4
 
 # Memory configuration (optional)
 use_memory: false
@@ -86,4 +92,8 @@ logging:
   tags:
     - "llama3"
     - "samsum"
-    - "summarization" 
+    - "summarization"
+  wandb: true
+  log_steps: 10
+  eval_steps: 100
+  save_steps: 500 

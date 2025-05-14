@@ -1,171 +1,105 @@
 #!/usr/bin/env python3
 """
-ATHENA evaluation script.
+Evaluation script for ATHENA models.
 """
 
-import os
-import sys
 import argparse
-from typing import Dict, List
+import os
 import torch
-import torch.nn as nn
-from torch.utils.data import DataLoader
-from transformers import AutoModelForCausalLM, AutoTokenizer
-import evaluate
-from tqdm import tqdm
-import json
-
-# Add parent directory to path
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from athena.utils import load_config, count_trainable_params, compute_flops
-
+import yaml
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    Trainer,
+    TrainingArguments,
+)
+from datasets import load_dataset
+from athena import PolyAdapter
+from athena.utils import setup_logging
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Evaluate ATHENA model")
-    parser.add_argument(
-        "--config",
-        type=str,
-        required=True,
-        help="Path to config file",
-    )
-    parser.add_argument(
-        "--checkpoint",
-        type=str,
-        required=True,
-        help="Path to model checkpoint",
-    )
-    parser.add_argument(
-        "--output_dir",
-        type=str,
-        default="eval_outputs",
-        help="Output directory",
-    )
+    parser.add_argument("--config", type=str, required=True, help="Path to config file")
+    parser.add_argument("--checkpoint", type=str, required=True, help="Path to model checkpoint")
+    parser.add_argument("--output_dir", type=str, default="eval_outputs", help="Output directory")
     return parser.parse_args()
 
+def load_config(config_path):
+    with open(config_path, "r") as f:
+        return yaml.safe_load(f)
 
-def evaluate_model(
-    model: nn.Module,
-    eval_dataloader: DataLoader,
-    config: Dict,
-    output_dir: str,
-):
-    """
-    Evaluate model on test set.
+def prepare_model(config, checkpoint_path):
+    model = AutoModelForCausalLM.from_pretrained(
+        checkpoint_path,
+        torch_dtype=torch.bfloat16 if config["training"]["mixed_precision"] == "bf16" else torch.float16,
+        use_flash_attention_2=config["model"]["use_flash_attention"],
+    )
     
-    Args:
-        model: HuggingFace model
-        eval_dataloader: Evaluation dataloader
-        config: Evaluation configuration
-        output_dir: Output directory
-    """
-    # Initialize metrics
-    metrics = {}
-    if config["evaluation"]["metrics"]:
-        for metric_name in config["evaluation"]["metrics"]:
-            metrics[metric_name] = evaluate.load(metric_name)
-    
-    # Evaluation loop
-    model.eval()
-    all_predictions = []
-    all_references = []
-    
-    with torch.no_grad():
-        for batch in tqdm(eval_dataloader):
-            # Move batch to device
-            batch = {k: v.to(model.device) for k, v in batch.items()}
-            
-            # Generate predictions
-            outputs = model.generate(
-                **batch,
-                **config["generation"],
+    # Add PolyAdapter layers if not already present
+    if not hasattr(model.transformer.h[0].attention, "is_polyadapter"):
+        for layer in model.transformer.h:
+            layer.attention = PolyAdapter(
+                in_features=model.config.hidden_size,
+                out_features=model.config.hidden_size,
+                rank=config["adapter"]["rank"],
+                num_experts=config["adapter"]["num_experts"],
+                use_lora=config["adapter"]["use_lora"],
+                use_ia3=config["adapter"]["use_ia3"],
+                use_moe=config["adapter"]["use_moe"],
             )
-            
-            # Decode predictions and references
-            predictions = model.tokenizer.batch_decode(
-                outputs,
-                skip_special_tokens=True,
-            )
-            references = model.tokenizer.batch_decode(
-                batch["labels"],
-                skip_special_tokens=True,
-            )
-            
-            all_predictions.extend(predictions)
-            all_references.extend(references)
     
-    # Compute metrics
-    results = {}
-    for metric_name, metric in metrics.items():
-        results[metric_name] = metric.compute(
-            predictions=all_predictions,
-            references=all_references,
-        )
-    
-    # Add model stats
-    results["model_stats"] = {
-        "trainable_params": count_trainable_params(model),
-        "total_params": sum(p.numel() for p in model.parameters()),
-        "flops": compute_flops(
-            model=model,
-            input_shape=(
-                config["model"]["max_length"],
-                config["model"]["hidden_size"],
-            ),
-            batch_size=config["evaluation"]["batch_size"],
-        ),
-    }
-    
-    # Save results
-    os.makedirs(output_dir, exist_ok=True)
-    with open(os.path.join(output_dir, "results.json"), "w") as f:
-        json.dump(results, f, indent=2)
-    
-    return results
+    return model
 
+def prepare_dataset(config):
+    dataset = load_dataset(config["dataset"]["name"])
+    
+    if config["dataset"]["max_samples"]:
+        dataset = dataset.select(range(min(config["dataset"]["max_samples"], len(dataset))))
+    
+    return dataset
 
 def main():
     args = parse_args()
-    
-    # Load config
     config = load_config(args.config)
     
-    # Create output directory
-    os.makedirs(args.output_dir, exist_ok=True)
+    # Setup logging
+    setup_logging()
     
-    # Load model and tokenizer
-    model = AutoModelForCausalLM.from_pretrained(
-        config["model"]["name"],
-        torch_dtype=torch.float16 if config["evaluation"]["use_fp16"] else torch.float32,
-    )
+    # Prepare model and dataset
+    model = prepare_model(config, args.checkpoint)
+    dataset = prepare_dataset(config)
     tokenizer = AutoTokenizer.from_pretrained(config["model"]["name"])
     
-    # Load checkpoint
-    checkpoint = torch.load(args.checkpoint)
-    model.load_state_dict(checkpoint["model_state_dict"])
-    
-    # Load dataset
-    # TODO: Implement dataset loading based on config
-    
-    # Evaluate model
-    results = evaluate_model(
-        model=model,
-        eval_dataloader=eval_dataloader,
-        config=config,
+    # Setup evaluation arguments
+    eval_args = TrainingArguments(
         output_dir=args.output_dir,
+        per_device_eval_batch_size=config["training"]["batch_size"],
+        fp16=config["training"]["mixed_precision"] == "fp16",
+        bf16=config["training"]["mixed_precision"] == "bf16",
+        report_to="wandb" if config["logging"]["wandb"] else None,
     )
     
-    # Print results
+    # Initialize trainer
+    trainer = Trainer(
+        model=model,
+        args=eval_args,
+        eval_dataset=dataset["test"],
+        tokenizer=tokenizer,
+    )
+    
+    # Run evaluation
+    metrics = trainer.evaluate()
+    
+    # Print metrics
     print("\nEvaluation Results:")
-    print("-" * 50)
-    for metric_name, value in results.items():
-        if isinstance(value, dict):
-            print(f"\n{metric_name}:")
-            for k, v in value.items():
-                print(f"  {k}: {v}")
-        else:
-            print(f"{metric_name}: {value}")
-
+    for key, value in metrics.items():
+        print(f"{key}: {value:.4f}")
+    
+    # Save metrics
+    os.makedirs(args.output_dir, exist_ok=True)
+    with open(os.path.join(args.output_dir, "metrics.txt"), "w") as f:
+        for key, value in metrics.items():
+            f.write(f"{key}: {value:.4f}\n")
 
 if __name__ == "__main__":
     main() 

@@ -3,197 +3,91 @@ Utility functions for ATHENA.
 """
 
 import os
-from typing import Dict, List, Optional, Tuple, Union
-import json
-import yaml
+import logging
 import torch
-import torch.nn as nn
-from transformers import PreTrainedModel
+import torch.distributed as dist
+from typing import Dict, Optional
 
+def setup_logging():
+    """Setup logging configuration."""
+    logging.basicConfig(
+        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+        datefmt="%m/%d/%Y %H:%M:%S",
+        level=logging.INFO,
+    )
 
-def load_config(config_path: str) -> Dict:
-    """
-    Load configuration from YAML or JSON file.
-    
-    Args:
-        config_path: Path to config file
-        
-    Returns:
-        Configuration dictionary
-    """
-    ext = os.path.splitext(config_path)[1].lower()
-    with open(config_path, "r") as f:
-        if ext == ".yaml" or ext == ".yml":
-            config = yaml.safe_load(f)
-        elif ext == ".json":
-            config = json.load(f)
-        else:
-            raise ValueError(f"Unsupported config file format: {ext}")
-    return config
+def setup_distributed():
+    """Setup distributed training environment."""
+    if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
+        rank = int(os.environ["RANK"])
+        world_size = int(os.environ["WORLD_SIZE"])
+        dist.init_process_group(
+            backend="nccl",
+            init_method="env://",
+            world_size=world_size,
+            rank=rank,
+        )
+        torch.cuda.set_device(rank)
 
-
-def count_trainable_params(model: nn.Module) -> int:
-    """
-    Count number of trainable parameters in model.
-    
-    Args:
-        model: PyTorch model
-        
-    Returns:
-        Number of trainable parameters
-    """
+def count_trainable_params(model: torch.nn.Module) -> int:
+    """Count number of trainable parameters in model."""
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
-
-def get_model_size(model: nn.Module) -> int:
-    """
-    Get total number of parameters in model.
-    
-    Args:
-        model: PyTorch model
-        
-    Returns:
-        Total number of parameters
-    """
-    return sum(p.numel() for p in model.parameters())
-
-
-def compute_flops(
-    model: PreTrainedModel,
-    input_shape: Tuple[int, int],
-    batch_size: int = 1
-) -> int:
-    """
-    Compute FLOPs for a forward pass.
-    
-    Args:
-        model: HuggingFace model
-        input_shape: (sequence_length, hidden_size)
-        batch_size: Batch size
-        
-    Returns:
-        Number of FLOPs
-    """
-    seq_len, hidden_size = input_shape
-    
-    # Count attention FLOPs
-    attention_flops = (
-        batch_size * seq_len * hidden_size *  # Q, K, V projections
-        3 +  # 3 matrices
-        batch_size * seq_len * seq_len * hidden_size *  # Attention scores
-        2 +  # Multiply and softmax
-        batch_size * seq_len * seq_len * hidden_size  # Output projection
-    )
-    
-    # Count feed-forward FLOPs
-    ffn_flops = (
-        batch_size * seq_len * hidden_size * hidden_size * 4 *  # First layer
-        2 +  # Multiply and activation
-        batch_size * seq_len * hidden_size * hidden_size  # Second layer
-    )
-    
-    # Count layer norm FLOPs
-    norm_flops = batch_size * seq_len * hidden_size * 4  # Mean, var, normalize
-    
-    # Total FLOPs per layer
-    layer_flops = attention_flops + ffn_flops + norm_flops * 2
-    
-    # Multiply by number of layers
-    num_layers = model.config.num_hidden_layers
-    total_flops = layer_flops * num_layers
-    
-    return total_flops
-
+def compute_gradient_norm(model: torch.nn.Module) -> float:
+    """Compute total gradient norm."""
+    total_norm = 0.0
+    for p in model.parameters():
+        if p.grad is not None:
+            param_norm = p.grad.data.norm(2)
+            total_norm += param_norm.item() ** 2
+    return total_norm ** 0.5
 
 def save_checkpoint(
-    model: nn.Module,
+    model: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
     scheduler: Optional[torch.optim.lr_scheduler._LRScheduler],
     step: int,
     metrics: Dict[str, float],
-    path: str
+    path: str,
 ):
-    """
-    Save model checkpoint.
-    
-    Args:
-        model: PyTorch model
-        optimizer: Optimizer
-        scheduler: Learning rate scheduler
-        step: Current training step
-        metrics: Dictionary of metrics
-        path: Path to save checkpoint
-    """
-    checkpoint = {
-        "model_state_dict": model.state_dict(),
-        "optimizer_state_dict": optimizer.state_dict(),
-        "step": step,
-        "metrics": metrics,
-    }
-    
-    if scheduler is not None:
-        checkpoint["scheduler_state_dict"] = scheduler.state_dict()
-    
-    torch.save(checkpoint, path)
-
+    """Save model checkpoint."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "scheduler_state_dict": scheduler.state_dict() if scheduler else None,
+            "step": step,
+            "metrics": metrics,
+        },
+        path,
+    )
 
 def load_checkpoint(
-    model: nn.Module,
+    model: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
     scheduler: Optional[torch.optim.lr_scheduler._LRScheduler],
-    path: str
-) -> Tuple[int, Dict[str, float]]:
-    """
-    Load model checkpoint.
-    
-    Args:
-        model: PyTorch model
-        optimizer: Optimizer
-        scheduler: Learning rate scheduler
-        path: Path to checkpoint
-        
-    Returns:
-        Tuple of (step, metrics)
-    """
+    path: str,
+) -> tuple[int, Dict[str, float]]:
+    """Load model checkpoint."""
     checkpoint = torch.load(path)
-    
     model.load_state_dict(checkpoint["model_state_dict"])
     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-    
-    if scheduler is not None and "scheduler_state_dict" in checkpoint:
+    if scheduler and checkpoint["scheduler_state_dict"]:
         scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
-    
     return checkpoint["step"], checkpoint["metrics"]
 
-
-def compute_gradient_norm(model: nn.Module) -> float:
-    """
-    Compute total gradient norm.
+def compute_flops(
+    model: torch.nn.Module,
+    input_shape: tuple[int, int],
+    batch_size: int,
+) -> int:
+    """Compute FLOPs for a forward pass."""
+    from thop import profile
     
-    Args:
-        model: PyTorch model
-        
-    Returns:
-        Total gradient norm
-    """
-    total_norm = 0.0
-    for p in model.parameters():
-        if p.grad is not None:
-            total_norm += p.grad.norm(2).item() ** 2
-    return total_norm ** 0.5
-
-
-def compute_parameter_norm(model: nn.Module) -> float:
-    """
-    Compute total parameter norm.
+    # Create dummy input
+    dummy_input = torch.randn(batch_size, *input_shape)
     
-    Args:
-        model: PyTorch model
-        
-    Returns:
-        Total parameter norm
-    """
-    total_norm = 0.0
-    for p in model.parameters():
-        total_norm += p.norm(2).item() ** 2
-    return total_norm ** 0.5 
+    # Compute FLOPs
+    flops, _ = profile(model, inputs=(dummy_input,))
+    return flops 
