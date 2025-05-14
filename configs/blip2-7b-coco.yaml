@@ -1,0 +1,154 @@
+# Model configuration
+model:
+  name: "Salesforce/blip2-opt-6.7b"
+  vision_encoder: "Salesforce/blip2-opt-6.7b"
+  max_length: 2048
+  hidden_size: 4096
+  vision_features: 1408
+  qformer_hidden_size: 768
+  num_query_tokens: 32
+
+# Training configuration
+training:
+  learning_rate: 1e-4
+  weight_decay: 0.01
+  num_epochs: 5
+  warmup_steps: 200
+  batch_size: 8
+  gradient_accumulation_steps: 4
+  eval_steps: 100
+  save_steps: 500
+  use_fp16: true
+  use_deepspeed: true
+  use_flash_attention: true
+  use_gradient_checkpointing: true
+
+# Dataset configuration
+dataset:
+  name: "coco"
+  train_split: "train"
+  val_split: "validation"
+  test_split: "test"
+  max_samples: null  # Use all samples
+  preprocessing:
+    image_size: 384
+    max_length: 2048
+    truncation: true
+    padding: "max_length"
+    image_processor:
+      do_resize: true
+      size: 384
+      resample: "bicubic"
+      do_center_crop: true
+      crop_size: 384
+      do_normalize: true
+      image_mean: [0.48145466, 0.4578275, 0.40821073]
+      image_std: [0.26862954, 0.26130258, 0.27577711]
+
+# Vision-Language PolyAdapter configuration
+vision_polyadapter:
+  use_lora: true
+  use_ia3: true
+  use_moe: true
+  use_cross_attention: true
+  use_qformer: true
+  rank: 8
+  num_experts: 4
+  k: 1
+  dropout: 0.1
+  qformer_config:
+    num_hidden_layers: 6
+    num_attention_heads: 12
+    intermediate_size: 3072
+    hidden_dropout_prob: 0.1
+    attention_probs_dropout_prob: 0.1
+    layer_norm_eps: 1e-12
+
+# AutoRank configuration
+autorank:
+  metric: "loss"
+  mode: "min"
+  rank_budget: 1024
+  rank_candidates: [0, 2, 4, 8, 16]
+  num_trials: 30
+  patience: 5
+  optimize_steps: 1000
+  layer_specific:
+    vision_encoder: [4, 8, 16]
+    qformer: [2, 4, 8]
+    language_model: [8, 16, 32]
+
+# Progressive Freezing configuration
+freezing_scheduler:
+  threshold: 1e-5
+  window_size: 10
+  unfreeze_threshold: 0.1
+  min_steps: 100
+  layer_groups:
+    vision_encoder: [0, 1, 2, 3]
+    qformer: [4, 5, 6, 7]
+    language_model: [8, 9, 10, 11]
+
+# Memory configuration
+use_memory: true
+memory:
+  memory_size: 2000
+  feature_dim: 4096
+  num_neighbors: 5
+  temperature: 0.1
+  memory_type: "episodic"
+  update_strategy: "fifo"
+  similarity_metric: "cosine"
+
+# Generation configuration
+generation:
+  max_length: 512
+  num_beams: 5
+  temperature: 0.7
+  top_p: 0.9
+  repetition_penalty: 1.2
+  length_penalty: 1.0
+  no_repeat_ngram_size: 3
+  early_stopping: true
+
+# Evaluation configuration
+evaluation:
+  metrics:
+    - "bleu"
+    - "rouge"
+    - "meteor"
+    - "cider"
+    - "spice"
+  batch_size: 16
+  use_fp16: true
+  num_workers: 4
+  use_cache: true
+
+# Logging configuration
+logging:
+  run_name: "blip2-7b-coco"
+  project: "athena"
+  tags:
+    - "blip2"
+    - "coco"
+    - "captioning"
+  wandb:
+    log_gradients: true
+    log_parameters: true
+    log_activations: true
+    log_attention: true
+    log_memory_stats: true
+
+# Optimization configuration
+optimization:
+  use_amp: true
+  use_compile: true
+  compile_mode: "reduce-overhead"
+  use_cuda_graphs: true
+  use_triton: true
+  use_quantization: false
+  quantization_config:
+    bits: 8
+    group_size: 128
+    scheme: "asym"
+    use_double_quant: true 

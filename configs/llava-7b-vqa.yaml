@@ -1,0 +1,95 @@
+# Model configuration
+model:
+  name: "llava-hf/llava-7b"
+  vision_encoder: "openai/clip-vit-large-patch14"
+  max_length: 2048
+  hidden_size: 4096
+  vision_features: 1024
+
+# Training configuration
+training:
+  learning_rate: 2e-4
+  weight_decay: 0.01
+  num_epochs: 3
+  warmup_steps: 100
+  batch_size: 4
+  gradient_accumulation_steps: 8
+  eval_steps: 100
+  save_steps: 500
+  use_fp16: true
+  use_deepspeed: true
+
+# Dataset configuration
+dataset:
+  name: "vqa_v2"
+  train_split: "train"
+  val_split: "validation"
+  test_split: "test"
+  max_samples: null  # Use all samples
+  preprocessing:
+    image_size: 224
+    max_length: 2048
+    truncation: true
+    padding: "max_length"
+
+# Vision-Language PolyAdapter configuration
+vision_polyadapter:
+  use_lora: true
+  use_ia3: true
+  use_moe: true
+  use_cross_attention: true
+  rank: 8
+  num_experts: 4
+  k: 1
+  dropout: 0.1
+
+# AutoRank configuration
+autorank:
+  metric: "loss"
+  mode: "min"
+  rank_budget: 1024
+  rank_candidates: [0, 2, 4, 8, 16]
+  num_trials: 30
+  patience: 5
+  optimize_steps: 1000
+
+# Progressive Freezing configuration
+freezing_scheduler:
+  threshold: 1e-5
+  window_size: 10
+  unfreeze_threshold: 0.1
+  min_steps: 100
+
+# Memory configuration (optional)
+use_memory: false
+memory:
+  memory_size: 1000
+  feature_dim: 4096
+  num_neighbors: 5
+  temperature: 0.1
+
+# Generation configuration
+generation:
+  max_length: 512
+  num_beams: 4
+  temperature: 0.7
+  top_p: 0.9
+  repetition_penalty: 1.2
+
+# Evaluation configuration
+evaluation:
+  metrics:
+    - "accuracy"
+    - "f1"
+    - "exact_match"
+  batch_size: 8
+  use_fp16: true
+
+# Logging configuration
+logging:
+  run_name: "llava-7b-vqa"
+  project: "athena"
+  tags:
+    - "llava"
+    - "vqa"
+    - "vision-language" 
