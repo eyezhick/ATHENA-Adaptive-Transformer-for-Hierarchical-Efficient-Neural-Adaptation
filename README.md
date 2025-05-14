@@ -1,0 +1,2 @@
+# ATHENA-Adaptive-Transformer-for-Hierarchical-Efficient-Neural-Adaptation
+ATHENA introduces a PolyAdapter layer that fuses low-rank adaptation (LoRA), scaling vectors (IA³) and sparse expert routing (MoE) under a single, switch-controlled module. A Bayesian AutoRank optimiser allocates the rank and sparsity budget per layer, while a Progressive Freezing Scheduler reduces compute by dynamically locking converged layers. 
